@@ -1,16 +1,16 @@
-# YouTube Brand Analyzer - Architecture Specification
+# YouTube Brand Analyzer - Architecture Specification (Updated)
 
 ## Project Overview
 A multi-agent system that analyzes YouTube videos for brand mentions and sentiment, then generates strategic engagement recommendations. Built for interview demonstration at Plot Technologies.
 
 ## Core Functionality
-**Input:** YouTube video URL(s) + brand name  
+**Input:** YouTube video URL(s) + brand website URL  
 **Output:** 
 - Brand relevance analysis
 - Sentiment assessment
 - Engagement recommendations (draft comments/tweets)
 
-**Key Feature:** User can ask follow-up questions about the analysis in a chat interface.
+**Current Status:** Core analysis working, chat feature and caching not yet implemented.
 
 ---
 
@@ -18,29 +18,31 @@ A multi-agent system that analyzes YouTube videos for brand mentions and sentime
 
 ### System Components
 ```
-User Input (video URL + brand)
+User Input (video URL + brand website URL)
     ↓
 URL Validation (hard-coded function)
     ↓
-Data Fetching (parallel - hard-coded functions)
-├─ fetchVideoTranscript() → chunks
-└─ fetchAudienceData() → comments + stats
+Brand Document Fetching (per-request)
+├─ Fetch brand website content
+├─ Chunk with RecursiveCharacterTextSplitter
+└─ Embed and store in MemoryVectorStore
+    ↓
+Video Data Fetching (parallel - hard-coded functions)
+├─ fetchVideoTranscript() → chunks (via Supadata API)
+├─ fetchComments() → array of strings
+└─ fetchAnalytics() → stats object
     ↓
 Agent 1: Analyst
-├─ Tool: brand_knowledge (Pinecone RAG)
+├─ Tool: brand_knowledge (MemoryVectorStore RAG)
 ├─ Analyzes: video chunks, comments, stats with brand context
-└─ Outputs: relevance assessment + insights
+└─ Outputs: analysis object
     ↓
 Agent 2: Evaluator
-├─ Reviews Agent 1's output
-├─ Checks: accuracy, brand alignment, completeness
+├─ Reviews Agent 1's output (structured response)
+├─ Returns: { approved: boolean, output: string }
 └─ Approves OR requests revision
     ↓
-Cache in Redis (session-based)
-    ↓
 Return to User
-    ↓
-Chat Interface Enabled (follow-up questions)
 ```
 
 ---
@@ -51,13 +53,13 @@ Chat Interface Enabled (follow-up questions)
 **Role:** Analyze video content for brand relevance
 
 **Tools:**
-- `brand_knowledge(query)` - RAG search in Pinecone for brand docs
+- `brand_knowledge(query)` - RAG search in MemoryVectorStore for brand content
 
 **Input:**
-- Video transcript chunks
-- Comments data
-- Video stats
-- Brand name
+- Video transcript chunks (from Supadata API)
+- Comments array (strings)
+- Video stats object
+- Brand website URL (triggers brand doc loading)
 
 **Output:**
 - Relevance: high/medium/low/none
@@ -78,6 +80,17 @@ Given video content, comments, and brand context:
 Use the brand_knowledge tool to understand brand values and voice.
 ```
 
+**Implementation:**
+```typescript
+import { createAgent } from 'langchain';
+
+const analystAgent = createAgent({
+  model: new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0.7 }),
+  tools: [brandKnowledgeTool],
+  systemPrompt: `You analyze YouTube videos for brand relevance...`
+});
+```
+
 ### Agent 2: Evaluator (Quality Control Agent)
 **Role:** Review Agent 1's output before showing to user
 
@@ -85,9 +98,13 @@ Use the brand_knowledge tool to understand brand values and voice.
 
 **Input:** Agent 1's analysis
 
-**Output:** 
-- Approve → send to user
-- Reject → request revision with feedback
+**Output (Structured):**
+```typescript
+{
+  approved: boolean,
+  output: string
+}
+```
 
 **System Prompt:**
 ```
@@ -99,7 +116,28 @@ Check:
 - Completeness: Are all key points covered?
 - Tone: Is it professional and helpful?
 
-Either approve the output or request specific improvements.
+Return approved: true if good, or approved: false with specific feedback.
+```
+
+**Implementation:**
+```typescript
+import { createAgent } from 'langchain';
+import { z } from 'zod';
+
+const evaluatorSchema = z.object({
+  approved: z.boolean(),
+  output: z.string()
+});
+
+const evaluatorAgent = createAgent({
+  model: new ChatOpenAI({ model: 'gpt-4o-mini' }),
+  tools: [],
+  systemPrompt: `You evaluate analysis quality...`,
+  responseFormat: {
+    type: 'json_object',
+    schema: evaluatorSchema
+  }
+});
 ```
 
 ---
@@ -108,15 +146,23 @@ Either approve the output or request specific improvements.
 
 ### Backend
 - **Runtime:** Node.js + TypeScript
-- **Framework:** Express
+- **Execution:** tsx (ESM-compatible)
+- **Framework:** Express (planned, not yet implemented)
 - **LLM:** LangChain + OpenAI (gpt-4o-mini)
-- **Vector DB:** Pinecone (text-embedding-3-small, 512 dimensions)
-- **Cache:** Upstash Redis (session management)
-- **APIs:** YouTube Data API v3, youtube-transcript library
+- **Vector DB:** MemoryVectorStore (in-memory, local)
+- **Embeddings:** OpenAI text-embedding-3-small (512 dimensions)
+- **APIs:** 
+  - Supadata API (video transcripts)
+  - YouTube Data API v3 (comments, stats)
 
-### Frontend (Later)
-- React (simple chat UI)
+### Frontend (Not Yet Built)
+- React (planned)
 - Or just use Postman/curl for testing
+
+### Not Yet Implemented
+- ❌ Upstash Redis (caching)
+- ❌ Chat endpoint
+- ❌ Session management
 
 ---
 
@@ -128,144 +174,95 @@ youtube-analyzer/
 │   │   ├── analyst.ts          # Agent 1
 │   │   └── evaluator.ts        # Agent 2
 │   ├── tools/
-│   │   ├── brandKnowledge.ts   # Pinecone RAG tool
-│   │   ├── fetchVideo.ts       # YouTube transcript fetcher
-│   │   └── fetchAudience.ts    # Comments + stats fetcher
+│   │   └── brand-knowledge.ts  # MemoryVectorStore RAG tool (hyphenated!)
 │   ├── utils/
 │   │   ├── validation.ts       # URL validation
-│   │   ├── chunking.ts         # Text chunking
-│   │   └── redis.ts            # Redis connection
-│   └── server.ts               # Express app
+│   │   ├── chunking.ts         # RecursiveCharacterTextSplitter wrapper
+│   │   ├── fetch-video.ts      # Supadata transcript fetcher
+│   │   ├── fetch-comments.ts   # YouTube comments
+│   │   └── fetch-analytics.ts  # YouTube stats
+│   ├── test-utils.ts           # Testing script
+│   └── server.ts               # Express app (planned)
 ├── .env                         # API keys
 ├── .gitignore
+├── .cursorrules
 ├── package.json
 └── tsconfig.json
 ```
+
+**Key Changes from Original Plan:**
+- ✅ Hyphenated filenames: `brand-knowledge.ts`, `fetch-video.ts`, etc.
+- ✅ Fetch functions in `utils/` not `tools/` (tools are for agent tools only)
+- ✅ Using `tsx` for execution instead of `ts-node`
 
 ---
 
 ## Data Flow
 
-### 1. Initial Analysis Request
+### Current Implementation (No API Yet)
+
+**Testing Flow:**
 ```typescript
-POST /api/analyze
-Body: { videoUrl: string, brandName: string }
+// Direct function calls (no HTTP)
+const videoData = await fetchVideoTranscript(videoUrl);
+const comments = await fetchComments(videoUrl);
+const stats = await fetchAnalytics(videoUrl);
 
-Flow:
-1. Validate URL format
-2. Fetch data in parallel:
-   - fetchVideoTranscript(url) → chunks
-   - fetchAudienceData(url) → { comments, stats }
-3. Invoke Agent 1 with:
-   - Video chunks
-   - Comments
-   - Stats
-   - Brand name (triggers RAG lookup)
-4. Agent 2 evaluates Agent 1's output
-5. Cache in Redis:
-   - session:{sessionId}:insights → Agent 1 output
-   - session:{sessionId}:videoData → raw chunks/comments
-6. Return: { insights, relevance, sessionId }
-```
+// Load brand content per-request
+await embedAndStore(brandUrl, vectorStore);
 
-### 2. Follow-up Chat
-```typescript
-POST /api/chat
-Body: { message: string, sessionId: string }
+// Run agents
+const analysis = await analystAgent.invoke({...});
+const evaluation = await evaluatorAgent.invoke({...});
 
-Flow:
-1. Load from Redis:
-   - Cached insights
-   - Chat history
-   - Raw video data (if needed)
-2. Invoke Agent 1 with:
-   - User's question
-   - Cached context
-   - Chat history
-3. Agent 2 evaluates response
-4. Update Redis:
-   - Append to chat history
-5. Return: { reply }
+// Return result
+console.log(evaluation.output);
 ```
 
 ---
 
-## Database Strategy
+## API Endpoints (Planned)
 
-### Redis (MVP - Session Cache)
-**Keys:**
-```
-session:{sessionId}:meta → { brandName, videoUrl, analyzedAt }
-session:{sessionId}:insights → Agent 1's initial analysis
-session:{sessionId}:chat → Chat history array
-video:{videoId}:data → { chunks, comments, stats } (optional cache)
-```
+### POST /api/analyze (Not Yet Implemented)
 
-**TTL:** 24 hours
+**Request Schema:**
 
-### MongoDB (Production - Not MVP)
-**Mention in interview:**
-> "Currently using Redis for session caching. In production, I'd add MongoDB to:
-> - Persist video metadata and analyses
-> - Enable queries like 'show me all Nike videos from last week'
-> - Prevent re-analyzing the same video
-> - Track sentiment trends over time"
+| Property | Type | Required | Description | Example |
+|----------|------|----------|-------------|---------|
+| `videoUrl` | `string` | ✅ Yes | Valid YouTube URL | `"https://youtube.com/watch?v=dQw4w9WgXcQ"` |
+| `brandUrl` | `string` | ✅ Yes | Brand website URL to analyze | `"https://www.nike.com"` |
 
-**Collections (future):**
-- `videos` - Video metadata + analysis results
-- `sessions` - User session history
-- `users` - User accounts (if multi-user)
-
----
-
-## API Endpoints
-
-### `POST /api/analyze`
-**Request:**
+**Request Example:**
 ```json
 {
-  "videoUrl": "https://youtube.com/watch?v=...",
-  "brandName": "Nike"
+  "videoUrl": "https://youtube.com/watch?v=dQw4w9WgXcQ",
+  "brandUrl": "https://www.nike.com"
 }
 ```
 
-**Response:**
-```json
-{
-  "sessionId": "sess_xyz123",
-  "relevance": "high",
-  "insights": {
-    "summary": "Positive product review...",
-    "sentiment": "positive",
-    "keyPoints": [
-      "Mentions Nike shoes at 3:42",
-      "Compares favorably to competitors",
-      "Shows product prominently"
-    ]
-  }
-}
-```
+**Response Schema (Success - 200):**
 
-**Error Cases:**
-- Invalid URL → 400
-- Video not found → 404
-- No brand relevance → 200 with relevance: "none"
+| Property | Type | Description |
+|----------|------|-------------|
+| `relevance` | `"high" \| "medium" \| "low" \| "none"` | Brand relevance level |
+| `insights` | `AnalysisInsights` | Analysis details |
 
-### `POST /api/chat`
-**Request:**
-```json
-{
-  "sessionId": "sess_xyz123",
-  "message": "Tell me more about the negative comments"
-}
-```
+**AnalysisInsights Object:**
 
-**Response:**
-```json
-{
-  "reply": "The negative comments primarily focus on..."
-}
-```
+| Property | Type | Description |
+|----------|------|-------------|
+| `summary` | `string` | Brief summary of findings |
+| `sentiment` | `"positive" \| "neutral" \| "negative"` | Overall sentiment |
+| `keyPoints` | `string[]` | Array of key insights (3-5 items) |
+| `videoStats` | `VideoStats` | Video statistics |
+
+**VideoStats Object:**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `views` | `number` | View count |
+| `likes` | `number` | Like count |
+| `commentCount` | `number` | Comment count |
 
 ---
 
@@ -274,11 +271,12 @@ video:{videoId}:data → { chunks, comments, stats } (optional cache)
 # .env
 OPENAI_API_KEY=sk-...
 YOUTUBE_API_KEY=AIza...
-PINECONE_API_KEY=pcsk_...
-PINECONE_INDEX_NAME=youtube-analyzer
-UPSTASH_REDIS_REST_URL=https://...
-UPSTASH_REDIS_REST_TOKEN=...
+SUPADATA_API_KEY=...          # For video transcripts
 PORT=3000
+
+# Not yet implemented:
+# UPSTASH_REDIS_REST_URL=https://...
+# UPSTASH_REDIS_REST_TOKEN=...
 ```
 
 ---
@@ -287,262 +285,382 @@ PORT=3000
 
 ### 1. URL Validation (Simple Function)
 ```typescript
-function validateYouTubeUrl(url: string): { valid: boolean; videoId?: string } {
+// utils/validation.ts
+export function validateYouTubeUrl(url: string): { valid: boolean; videoId?: string } {
   const regex = /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/;
   const match = url.match(regex);
   return match ? { valid: true, videoId: match[1] } : { valid: false };
 }
 ```
 
-### 2. Data Fetching (Hard-coded Functions)
+### 2. Transcript Fetching (Supadata API)
 ```typescript
-async function fetchVideoTranscript(url: string): Promise<string[]> {
-  // Uses youtube-transcript library
-  const transcript = await YoutubeTranscript.fetchTranscript(url);
-  const fullText = transcript.map(t => t.text).join(' ');
-  return chunkText(fullText, 500); // 500 words per chunk
-}
-
-async function fetchAudienceData(url: string) {
-  // Uses YouTube Data API v3
+// utils/fetch-video.ts
+export async function fetchVideoTranscript(url: string): Promise<string> {
   const { videoId } = validateYouTubeUrl(url);
   
-  const stats = await youtube.videos.list({
-    part: ['statistics'],
-    id: [videoId]
-  });
+  const response = await fetch(
+    `https://api.supadata.ai/v1/youtube/transcript?url=https://youtube.com/watch?v=${videoId}`,
+    {
+      headers: {
+        'x-api-key': process.env.SUPADATA_API_KEY!,
+      }
+    }
+  );
   
-  const comments = await youtube.commentThreads.list({
-    part: ['snippet'],
-    videoId: videoId,
-    maxResults: 100
-  });
-  
-  return { stats, comments };
+  const data = await response.json();
+  return data.transcript; // Full text
 }
 ```
 
-### 3. Brand Knowledge Tool (Pinecone RAG)
+### 3. Text Chunking (RecursiveCharacterTextSplitter)
 ```typescript
+// utils/chunking.ts
+import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
+
+export async function chunkText(text: string, chunkSize: number = 500): Promise<string[]> {
+  const splitter = new RecursiveCharacterTextSplitter({
+    chunkSize,
+    chunkOverlap: 100,
+  });
+  
+  const chunks = await splitter.splitText(text);
+  return chunks;
+}
+```
+
+### 4. Comments Fetching
+```typescript
+// utils/fetch-comments.ts
+import { google } from 'googleapis';
+
+const youtube = google.youtube({
+  version: 'v3',
+  auth: process.env.YOUTUBE_API_KEY!,
+});
+
+export async function fetchComments(url: string): Promise<string[]> {
+  const { videoId } = validateYouTubeUrl(url);
+  
+  const response = await youtube.commentThreads.list({
+    part: ['snippet'],
+    videoId,
+    maxResults: 100,
+  });
+  
+  return response.data.items?.map(
+    item => item.snippet?.topLevelComment?.snippet?.textDisplay || ''
+  ) || [];
+}
+```
+
+### 5. Analytics Fetching
+```typescript
+// utils/fetch-analytics.ts
+export async function fetchAnalytics(url: string) {
+  const { videoId } = validateYouTubeUrl(url);
+  
+  const response = await youtube.videos.list({
+    part: ['statistics'],
+    id: [videoId],
+  });
+  
+  const stats = response.data.items?.[0]?.statistics;
+  
+  return {
+    views: parseInt(stats?.viewCount || '0'),
+    likes: parseInt(stats?.likeCount || '0'),
+    commentCount: parseInt(stats?.commentCount || '0'),
+  };
+}
+```
+
+### 6. Brand Knowledge Tool (MemoryVectorStore)
+```typescript
+// tools/brand-knowledge.ts
 import { tool } from 'langchain';
-import { Pinecone } from '@pinecone-database/pinecone';
+import { MemoryVectorStore } from '@langchain/classic/vectorstores/memory';
 import { OpenAIEmbeddings } from '@langchain/openai';
 import { z } from 'zod';
 
-const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
-const index = pc.Index(process.env.PINECONE_INDEX_NAME);
-const embeddings = new OpenAIEmbeddings({ model: 'text-embedding-3-small' });
-
-export const brandKnowledge = tool(
-  async ({ query }) => {
-    // Generate embedding
-    const queryEmbedding = await embeddings.embedQuery(query);
-    
-    // Search Pinecone
-    const results = await index.query({
-      vector: queryEmbedding,
-      topK: 3,
-      includeMetadata: true
-    });
-    
-    // Return relevant text
-    return results.matches
-      .map(match => match.metadata?.text || '')
-      .join('\n\n');
-  },
-  {
-    name: 'brand_knowledge',
-    description: 'Search brand guidelines, values, and focus areas',
-    schema: z.object({
-      query: z.string().describe('What to search for in brand docs')
-    })
-  }
-);
-```
-
-### 4. Agent Setup
-```typescript
-import { createAgent } from 'langchain';
-import { ChatOpenAI } from '@langchain/openai';
-
-const model = new ChatOpenAI({ 
-  model: 'gpt-4o-mini',
-  temperature: 0.7 
+const embeddings = new OpenAIEmbeddings({ 
+  model: 'text-embedding-3-small'
 });
 
-export const analystAgent = createAgent({
-  model,
-  tools: [brandKnowledge],
-  systemPrompt: `You analyze YouTube videos for brand relevance...`
+export async function embedAndStore(brandUrl: string, vectorStore: MemoryVectorStore) {
+  // Fetch brand website content
+  const response = await fetch(brandUrl);
+  const html = await response.text();
+  
+  // Extract text from HTML (simple approach - could be improved)
+  const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  
+  // Chunk the text
+  const chunks = await chunkText(text, 500);
+  
+  // Create documents
+  const docs = chunks.map(chunk => ({
+    pageContent: chunk,
+    metadata: { source: brandUrl }
+  }));
+  
+  // Add to vector store
+  await vectorStore.addDocuments(docs);
+}
+
+export function createBrandKnowledgeTool(vectorStore: MemoryVectorStore) {
+  return tool(
+    async ({ query }) => {
+      const results = await vectorStore.similaritySearch(query, 3);
+      return results.map(doc => doc.pageContent).join('\n\n');
+    },
+    {
+      name: 'brand_knowledge',
+      description: 'Search brand website content for relevant information',
+      schema: z.object({
+        query: z.string().describe('What to search for in brand content')
+      })
+    }
+  );
+}
+```
+
+### 7. Agent Setup
+```typescript
+// agents/analyst.ts
+import { createAgent } from 'langchain';
+import { ChatOpenAI } from '@langchain/openai';
+import { createBrandKnowledgeTool } from '../tools/brand-knowledge.js';
+
+export function createAnalystAgent(vectorStore: MemoryVectorStore) {
+  const model = new ChatOpenAI({ 
+    model: 'gpt-4o-mini',
+    temperature: 0.7 
+  });
+  
+  const brandKnowledgeTool = createBrandKnowledgeTool(vectorStore);
+  
+  return createAgent({
+    model,
+    tools: [brandKnowledgeTool],
+    systemPrompt: `You analyze YouTube videos for brand relevance...`
+  });
+}
+```
+```typescript
+// agents/evaluator.ts
+import { createAgent } from 'langchain';
+import { ChatOpenAI } from '@langchain/openai';
+import { z } from 'zod';
+
+const evaluatorSchema = z.object({
+  approved: z.boolean().describe('Whether the analysis is approved'),
+  output: z.string().describe('Final output or feedback for revision')
 });
 
 export const evaluatorAgent = createAgent({
-  model,
+  model: new ChatOpenAI({ model: 'gpt-4o-mini' }),
   tools: [],
-  systemPrompt: `You evaluate analysis quality...`
+  systemPrompt: `You evaluate analysis quality...`,
+  responseFormat: {
+    type: 'json_object',
+    schema: evaluatorSchema
+  }
 });
-```
-
-### 5. Redis Session Management
-```typescript
-import { Redis } from '@upstash/redis';
-
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL!,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN!
-});
-
-export async function saveSession(sessionId: string, data: any) {
-  await redis.set(`session:${sessionId}:insights`, JSON.stringify(data), {
-    ex: 86400 // 24 hours
-  });
-}
-
-export async function getSession(sessionId: string) {
-  const data = await redis.get(`session:${sessionId}:insights`);
-  return data ? JSON.parse(data as string) : null;
-}
 ```
 
 ---
 
-## Edge Cases & Error Handling
-
-### Invalid URL
-```typescript
-if (!validateYouTubeUrl(videoUrl).valid) {
-  return res.status(400).json({ 
-    error: 'Invalid YouTube URL format' 
-  });
-}
+## Performance Metrics (Current)
+```
+✅ Chunking:        ~1ms (4 chunks)
+✅ Video stats:     ~150ms
+✅ Comments:        ~240ms
+✅ Transcript:      ~1s (Supadata API)
+⚠️  Analyst agent:  ~16s (includes RAG queries + analysis)
+✅ Evaluator:       ~2s
+---
+Total:              ~19.5s
 ```
 
-### No Brand Relevance
-```typescript
-// Agent 1 determines no relevance
-if (analysis.relevance === 'none') {
-  return res.json({
-    sessionId,
-    relevance: 'none',
-    insights: {
-      summary: 'This video does not mention or relate to [brand].'
-    }
-  });
-}
-```
-
-### Multiple Videos
-```typescript
-// For MVP: Accept one video at a time
-// In production: Loop through array of URLs
-```
+**Performance Notes:**
+- Analyst agent is the bottleneck (82% of total time)
+- MemoryVectorStore queries are fast (in-memory)
+- Most time spent in LLM inference, not data fetching
 
 ---
 
-## Build Order (Recommended)
+## Build Progress
 
-### Day 1 (Feb 15): Foundation
-1. ✅ Environment setup (DONE)
-2. ✅ API connection tests (DONE)
-3. Create data fetching functions
-   - `tools/fetchVideo.ts`
-   - `tools/fetchAudience.ts`
-4. Test with real YouTube video
+### Completed ✅
+- [x] Environment setup
+- [x] URL validation
+- [x] All data fetching functions (Supadata, YouTube API)
+- [x] Text chunking with RecursiveCharacterTextSplitter
+- [x] MemoryVectorStore setup
+- [x] Brand knowledge tool
+- [x] Agent 1 (Analyst)
+- [x] Agent 2 (Evaluator) with structured output
+- [x] Full integration working
 
-### Day 2 (Feb 16): Agents
-1. Create brand knowledge tool
-   - `tools/brandKnowledge.ts`
-   - Upload sample brand doc to Pinecone
-2. Build Agent 1 (Analyst)
-   - `agents/analyst.ts`
-3. Build Agent 2 (Evaluator)
-   - `agents/evaluator.ts`
-4. Test agent flow end-to-end
+### Not Yet Implemented ❌
+- [ ] Redis caching
+- [ ] Chat endpoint for follow-ups
+- [ ] Express API (`/api/analyze`)
+- [ ] Session management
+- [ ] Error handling/retries
+- [ ] Frontend
 
-### Day 3 (Feb 17): API & Caching
-1. Build Express endpoints
-   - `POST /api/analyze`
-   - `POST /api/chat`
-2. Implement Redis caching
-   - `utils/redis.ts`
-3. Test full workflow
+---
 
-### Days 4-5 (Feb 20-23): Polish & Practice
-1. Error handling
-2. Logging
-3. Code cleanup
-4. Practice 1-hour rebuilds with Cursor
+## Next Steps (Tomorrow - Feb 17)
+
+### Priority 1: Optimization
+1. Implement Redis caching
+   - Cache transcripts (24h TTL)
+   - Cache comments (1h TTL)
+   - Cache brand embeddings (1h TTL)
+   - Cache analysis results (1h TTL)
+
+### Priority 2: Chat Feature
+1. Implement chat agent for follow-ups
+2. Store chat history in Redis
+3. Reference cached analysis for context
+
+### Priority 3: API Layer (If Time)
+1. Set up Express server
+2. Implement `POST /api/analyze`
+3. Add proper error handling
+
+---
+
+## TypeScript Type Definitions
+```typescript
+// Request Types (for future API)
+export interface AnalyzeRequest {
+  videoUrl: string;
+  brandUrl: string;  // Changed from brandName
+}
+
+export interface ChatRequest {
+  sessionId: string;
+  message: string;
+}
+
+// Response Types
+export type RelevanceLevel = 'high' | 'medium' | 'low' | 'none';
+export type SentimentType = 'positive' | 'neutral' | 'negative';
+
+export interface VideoStats {
+  views: number;
+  likes: number;
+  commentCount: number;
+}
+
+export interface AnalysisInsights {
+  summary: string;
+  sentiment: SentimentType;
+  keyPoints: string[];
+  videoStats: VideoStats;
+  draftComment?: string;
+}
+
+export interface AnalyzeResponse {
+  relevance: RelevanceLevel;
+  insights: AnalysisInsights;
+}
+
+export interface ChatResponse {
+  reply: string;
+  draftComment?: string;
+}
+
+// Evaluator structured output
+export interface EvaluatorResponse {
+  approved: boolean;
+  output: string;
+}
+```
 
 ---
 
 ## Interview Talking Points
 
 ### Architecture Decisions
-> "I separated data fetching from analysis. Simple functions handle API calls, while agents focus on intelligent decision-making with brand context via RAG."
+
+**Brand Input Change:**
+> "I changed from brandName to brandUrl so the system can dynamically load brand content from their website. This makes it more flexible - you don't need pre-loaded brand docs, just point it at any brand's site."
+
+**MemoryVectorStore vs Pinecone:**
+> "For the MVP, I used MemoryVectorStore because it's simpler and faster for single-user scenarios. In production, I'd migrate to Pinecone for persistent storage and multi-user support, but the tool interface stays the same."
+
+**Supadata API:**
+> "YouTube's transcript APIs were unreliable (youtube-transcript broke, LangChain's loader had issues). Supadata provides a stable, paid API with better reliability. In production, I'd add fallback logic to try multiple sources."
+
+**Structured Output for Evaluator:**
+> "The evaluator returns a structured response with Zod validation - this ensures I always get a predictable format with `approved` boolean and `output` string. Makes error handling and routing much cleaner than parsing unstructured text."
+
+**Per-Request Brand Loading:**
+> "Since users provide brandUrl in each request, I load and embed brand content per-request rather than at startup. For production, I'd cache embeddings in Redis with brandUrl as the key to avoid re-processing."
+
+**No Caching Yet:**
+> "I built the core functionality first to prove the concept. Next step is Redis caching for transcripts, embeddings, and results - this will cut the 16-second analyst time dramatically for repeat analyses."
 
 ### Cost Optimization
-> "Agent 1 and 2 run sequentially to minimize LLM calls. I cache intermediate results in Redis so follow-up questions don't re-analyze the video."
+> "The analyst agent takes 16 seconds, mostly from LLM inference. I plan to add caching for repeat videos and pre-filter chunks before sending to the LLM to reduce token usage."
 
-### Production Thinking
-> "For MVP, Redis handles session caching. In production, I'd add MongoDB for persistent storage, enabling features like 'show sentiment trends' and preventing duplicate analysis."
-
-### RAG Design
-> "I use Pinecone with text-embedding-3-small (512 dimensions) for brand knowledge. This lets Agent 1 understand brand values without hardcoding them."
-
-### Multi-Agent Orchestration
-> "Agent 2 acts as quality control, preventing bad outputs from reaching users. This 'chamber music' model ensures both agents contribute to the final result."
-
-### Edge Cases
-> "The system handles irrelevant videos gracefully - Agent 1 assesses relevance before deep analysis, saving tokens on off-topic content."
+### Production Roadmap
+> "Current state: Working prototype with in-memory storage. Production additions would be: Redis for caching, Pinecone for persistent vector storage, session management for multi-user, and rate limiting."
 
 ---
 
-## Sample Brand Document (For Pinecone)
-```text
-Nike Brand Guidelines
+## Changes from Original Plan
 
-Brand Values:
-- Performance and innovation
-- Athlete empowerment
-- Sustainability and responsibility
-- Inclusivity in sports
+| Original | Implemented | Reason |
+|----------|-------------|--------|
+| `brandName: string` | `brandUrl: string` | Dynamic brand content loading |
+| Pinecone | MemoryVectorStore | Simpler for MVP, faster iteration |
+| youtube-transcript | Supadata API | Reliability issues with free libraries |
+| `ts-node` | `tsx` | Better ESM support |
+| Pinecone setup in startup | Brand loading per-request | User provides URL dynamically |
+| Tools in `tools/` | Fetch utils in `utils/` | Better separation: tools = agent tools only |
+| camelCase files | hyphenated-files | Consistent naming convention |
+| createReactAgent | createAgent | Simpler API, matches current LangChain docs |
+| Plain text evaluator | Structured Zod schema | Type-safe, predictable responses |
 
-Product Focus:
-- Running and training footwear
-- Athletic apparel
-- Performance technology (Air, React, Flyknit)
+---
 
-Brand Voice:
-- Motivational and inspiring
-- Direct and confident
-- Athlete-focused
+## Running the Project
 
-Key Messaging:
-- "Just Do It" - overcoming challenges
-- Innovation in performance
-- Supporting athletes at all levels
+### Install Dependencies
+```bash
+npm install --legacy-peer-deps
+```
 
-Sustainability Initiatives:
-- Move to Zero carbon emissions
-- Sustainable materials (recycled polyester)
-- Circular design principles
+### Environment Setup
+```bash
+# Create .env
+OPENAI_API_KEY=sk-...
+YOUTUBE_API_KEY=AIza...
+SUPADATA_API_KEY=...
+```
 
-Engagement Guidelines:
-- Respond to positive product reviews
-- Address sustainability questions
-- Engage with athletic achievement stories
-- Avoid engaging with off-brand content
+### Run Tests
+```bash
+# Test utility functions
+tsx server/test-utils.ts
+
+# Test full agent flow (manual test script)
+tsx server/test-agents.ts
+```
+
+### Future: Run Server
+```bash
+# Not yet implemented
+npm run dev
 ```
 
 ---
 
-## Next Steps
-
-1. **Save this document** as `ARCHITECTURE.md`
-2. **Create brand doc** as `brand-guidelines.txt`
-3. **Tomorrow morning:**
-   - Start with `tools/fetchVideo.ts`
-   - Test with a real YouTube URL
-   - Build incrementally
-
-**Good luck building! 🚀**
+**Last Updated:** Feb 16, 2026, 7:28 PM  
+**Status:** Core functionality complete, optimization and API layer pending

@@ -15,7 +15,7 @@ Communication between client and server via REST API.
 Client                           Server
   │                                │
   │  POST /api/analyze             │
-  │  { videoUrl, brandName }  ────►│
+  │  { videoUrl, brandUrl }  ────►│
   │                                │─── Validate URL
   │                                │─── Fetch video data
   │                                │─── Run Agent 1 (Analyst)
@@ -47,13 +47,13 @@ Client                           Server
 | Property | Type | Required | Description | Example |
 |----------|------|----------|-------------|---------|
 | `videoUrl` | `string` | ✅ Yes | Valid YouTube URL | `"https://youtube.com/watch?v=dQw4w9WgXcQ"` |
-| `brandName` | `string` | ✅ Yes | Brand to analyze for | `"Nike"` |
+| `brandUrl` | `string` | ✅ Yes | Brand's about page | `"https://www.aloyoga.com/pages/we-are-alo"` |
 
 **Request Example:**
 ```json
 {
   "videoUrl": "https://youtube.com/watch?v=dQw4w9WgXcQ",
-  "brandName": "Nike"
+  "brandUrl": "https://www.aloyoga.com/pages/we-are-alo"
 }
 ```
 
